@@ -273,6 +273,7 @@ millisignv2:
   steps: 5e5
   action_repeat: 1  # Less action repeat for finer control
   envs: 4
+  batch_size: 64  # Increased for RTX 5060 Ti (16GB VRAM)
   train_ratio: 512
   time_limit: 360  # 12 seconds (longer episodes)
   video_pred_log: false
