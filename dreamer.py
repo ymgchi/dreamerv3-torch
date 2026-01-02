@@ -10,6 +10,7 @@ import numpy as np
 import ruamel.yaml as yaml
 
 sys.path.append(str(pathlib.Path(__file__).parent))
+sys.path.insert(0, "/workspace/gym-pybullet-drones")  # Add gym-pybullet-drones
 
 import exploration as expl
 import models
@@ -193,6 +194,36 @@ def make_env(config, mode, id):
 
         env = minecraft.make_env(task, size=config.size, break_speed=config.break_speed)
         env = wrappers.OneHotAction(env)
+    elif suite == "drone":
+        import envs.drone as drone
+
+        env = drone.PyBulletDrone(
+            task=task,
+            action_repeat=config.action_repeat,
+            size=config.size,
+            seed=config.seed + id,
+        )
+        env = wrappers.NormalizeActions(env)
+    elif suite == "trajectory":
+        import envs.drone_trajectory as drone_trajectory
+
+        env = drone_trajectory.PyBulletDroneTrajectory(
+            task=task,
+            action_repeat=config.action_repeat,
+            size=config.size,
+            seed=config.seed + id,
+        )
+        env = wrappers.NormalizeActions(env)
+    elif suite == "millisign":
+        import envs.drone_millisign as drone_millisign
+
+        env = drone_millisign.PyBulletDroneMilliSign(
+            task=task,
+            action_repeat=config.action_repeat,
+            size=config.size,
+            seed=config.seed + id,
+        )
+        env = wrappers.NormalizeActions(env)
     else:
         raise NotImplementedError(suite)
     env = wrappers.TimeLimit(env, config.time_limit)

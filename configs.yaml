@@ -182,3 +182,87 @@ debug:
   prefill: 1
   batch_size: 10
   batch_length: 20
+
+# ドローン環境（PyBullet-Drones）
+drone:
+  task: drone_hover
+  steps: 5e5
+  action_repeat: 2
+  envs: 1
+  train_ratio: 512
+  time_limit: 240  # 8秒 * 30Hz
+  video_pred_log: false  # 状態ベースなのでビデオ予測なし
+  # 状態ベースの観測（画像なし）
+  encoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^'}
+
+drone_vision:
+  task: drone_hover
+  steps: 1e6
+  action_repeat: 2
+  envs: 1
+  train_ratio: 512
+  time_limit: 240
+  video_pred_log: true
+  # 画像ベースの観測
+  encoder: {mlp_keys: '$^', cnn_keys: 'image'}
+  decoder: {mlp_keys: '$^', cnn_keys: 'image'}
+
+# 軌道追従タスク（Trajectory Following）
+trajectory_circle:
+  task: trajectory_circle
+  steps: 5e5
+  action_repeat: 2
+  envs: 4
+  train_ratio: 512
+  time_limit: 300  # 10秒 * 30Hz
+  video_pred_log: false
+  # 状態ベース（位置＋ターゲット情報）
+  encoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^'}
+
+trajectory_figure8:
+  task: trajectory_figure8
+  steps: 5e5
+  action_repeat: 2
+  envs: 1
+  train_ratio: 512
+  time_limit: 300
+  video_pred_log: false
+  encoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^'}
+
+trajectory_waypoints:
+  task: trajectory_waypoints
+  steps: 5e5
+  action_repeat: 2
+  envs: 1
+  train_ratio: 512
+  time_limit: 300
+  video_pred_log: false
+  encoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^'}
+
+# MilliSign-based Person Following (mmWave radar tag tracking)
+millisign_follow:
+  task: millisign_follow
+  steps: 5e5
+  action_repeat: 2
+  envs: 4
+  train_ratio: 512
+  time_limit: 300  # 10秒 * 30Hz
+  video_pred_log: false
+  # 状態: ドローン(12) + レーダー検出(5) + 人速度(3) + ターゲット情報(3) = 23次元
+  encoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^'}
+
+millisign_approach:
+  task: millisign_approach
+  steps: 5e5
+  action_repeat: 2
+  envs: 4
+  train_ratio: 512
+  time_limit: 300
+  video_pred_log: false
+  encoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^'}
