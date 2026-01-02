@@ -266,3 +266,33 @@ millisign_approach:
   video_pred_log: false
   encoder: {mlp_keys: 'state', cnn_keys: '$^'}
   decoder: {mlp_keys: 'state', cnn_keys: '$^'}
+
+# MilliSign v2 - Improved version with curriculum learning
+millisignv2:
+  task: millisignv2_follow
+  steps: 5e5
+  action_repeat: 1  # Less action repeat for finer control
+  envs: 4
+  train_ratio: 512
+  time_limit: 360  # 12 seconds (longer episodes)
+  video_pred_log: false
+  prefill: 5000  # More prefill for exploration
+  # State: drone(12) + radar(5) + velocity(3) + target(3) + curriculum(1) = 24 dims
+  encoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  # More exploration
+  actor: {layers: 2, dist: 'normal', entropy: 1e-3, unimix_ratio: 0.01, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 3e-5, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+
+# MilliSign v2 with longer training
+millisignv2_long:
+  task: millisignv2_follow
+  steps: 1e6
+  action_repeat: 1
+  envs: 4
+  train_ratio: 512
+  time_limit: 360
+  video_pred_log: false
+  prefill: 5000
+  encoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  actor: {layers: 2, dist: 'normal', entropy: 1e-3, unimix_ratio: 0.01, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 3e-5, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}

@@ -224,6 +224,16 @@ def make_env(config, mode, id):
             seed=config.seed + id,
         )
         env = wrappers.NormalizeActions(env)
+    elif suite == "millisignv2":
+        import envs.drone_millisign_v2 as drone_millisign_v2
+
+        env = drone_millisign_v2.PyBulletDroneMilliSignV2(
+            task=task,
+            action_repeat=config.action_repeat,
+            size=config.size,
+            seed=config.seed + id,
+        )
+        env = wrappers.NormalizeActions(env)
     else:
         raise NotImplementedError(suite)
     env = wrappers.TimeLimit(env, config.time_limit)
