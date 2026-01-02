@@ -54,13 +54,13 @@ class PyBulletDroneMilliSignV2:
         self._episode_step = 0
         self._total_steps = 0  # For curriculum learning
 
-        # MilliSign radar parameters (based on paper)
+        # MilliSign radar parameters (based on AWR1843 specs)
         self._radar_max_range = 15.0
-        self._radar_min_range = 0.3  # Reduced from 0.5
-        self._radar_fov_azimuth = 90  # Increased from 60 (wider FOV)
-        self._radar_fov_elevation = 90
-        self._radar_noise_distance = 0.01
-        self._radar_noise_angle = 1.0
+        self._radar_min_range = 0.3
+        self._radar_fov_azimuth = 120   # AWR1843: ±60° (120° total)
+        self._radar_fov_elevation = 40  # AWR1843: ±20° (40° total)
+        self._radar_noise_distance = 0.01  # 10mm noise
+        self._radar_noise_angle = 1.0  # 1 degree noise (Root-MUSIC accuracy)
 
         # Person/target parameters
         self._person_pos = np.array([0.0, 0.0, 0.0])
