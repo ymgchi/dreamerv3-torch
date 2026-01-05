@@ -297,3 +297,68 @@ millisignv2_long:
   encoder: {mlp_keys: 'state', cnn_keys: '$^'}
   decoder: {mlp_keys: 'state', cnn_keys: '$^'}
   actor: {layers: 2, dist: 'normal', entropy: 1e-3, unimix_ratio: 0.01, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 3e-5, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+
+# MilliSign v2 Improved - Better tracking performance
+millisignv2_improved:
+  task: millisignv2_follow
+  steps: 1e6
+  action_repeat: 1
+  envs: 4
+  batch_size: 64
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480  # Longer episodes (16 sec)
+  video_pred_log: false
+  prefill: 10000  # More prefill for better initial exploration
+  discount: 0.995  # Slightly lower discount for faster learning
+  encoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  # More exploration with higher entropy
+  actor: {layers: 3, dist: 'normal', entropy: 3e-3, unimix_ratio: 0.02, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+
+# MilliSign v3 - Enhanced reward function and curriculum
+millisignv3:
+  task: millisignv3_follow
+  steps: 1e6
+  action_repeat: 1
+  envs: 4
+  batch_size: 64
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480  # 16 seconds
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.995
+  # State: drone(12) + radar(5) + velocity(3) + target(3) + curriculum(1) + streak(1) = 25 dims
+  encoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^'}
+  # Higher entropy for better exploration in fast scenarios
+  actor: {layers: 3, dist: 'normal', entropy: 5e-3, unimix_ratio: 0.02, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+
+# MilliSign v4 - State history, yaw alignment, strong distance reward
+millisignv4:
+  task: millisignv4_follow
+  steps: 1.5e6  # Longer training for complex state space
+  action_repeat: 1
+  envs: 4
+  batch_size: 32  # Reduced for memory
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 15000
+  discount: 0.995
+  # State: drone(72) + radar(5) + history(25) + vel(3) + pred_dir(2) + rel_vel(3) + target(3) + heading(2) + curriculum(1) + streak(1) + lost(1) = 118 dims
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  # Medium world model (fits in 16GB VRAM)
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  # Actor/critic
+  actor: {layers: 3, dist: 'normal', entropy: 5e-3, unimix_ratio: 0.02, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  # Longer imagination horizon for better planning
+  imag_horizon: 20
