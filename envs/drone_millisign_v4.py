@@ -8,9 +8,12 @@ Improvements over v3:
 4. Exploration reward after losing track
 5. Direction-focused reward over distance
 6. Jitter penalty for stable flight
-7. [NEW] Yaw alignment reward - drone faces target
-8. [NEW] Target heading angle in observation
-9. [NEW] Stronger distance reward
+7. Yaw alignment reward - drone faces target
+8. Target heading angle in observation
+9. [IMPROVED v5] Position-based reward instead of distance-based
+   - Target is 2.5m BEHIND person in their movement direction
+   - When person is stationary, target is on drone-to-person line
+   - Observation includes XYZ error to target position
 """
 import gym
 import numpy as np
@@ -25,7 +28,7 @@ class PyBulletDroneMilliSignV4:
     # History buffer size
     HISTORY_LENGTH = 5
 
-    def __init__(self, task="follow", action_repeat=1, size=(64, 64), seed=0):
+    def __init__(self, task="follow", action_repeat=1, size=(64, 64), seed=0, min_speed=None, reward_version="v12", stationary_target=False, goal_termination=False):
         from gym_pybullet_drones.envs.HoverAviary import HoverAviary
         from gym_pybullet_drones.utils.enums import ActionType, ObservationType
 
@@ -33,6 +36,18 @@ class PyBulletDroneMilliSignV4:
         self._size = size
         self._task = task
         self._rng = np.random.RandomState(seed)
+        self._reward_version = reward_version
+        self._stationary_target = stationary_target
+        self._goal_termination = goal_termination
+        self._goal_distance = 0.5  # Goal reached when within 0.5m
+        self._max_episode_steps = 900  # 30 seconds max (with goal_termination)
+
+        # Parse task for speed mode (e.g., "follow_fast" -> min_speed=0.8)
+        self._min_speed = min_speed
+        if "_fast" in task:
+            self._min_speed = 0.8
+        elif "_veryfast" in task:
+            self._min_speed = 1.0
 
         self._env = HoverAviary(
             gui=False,
@@ -41,6 +56,10 @@ class PyBulletDroneMilliSignV4:
             pyb_freq=240,
             ctrl_freq=30,
         )
+
+        # Extend episode length for goal termination
+        if self._goal_termination:
+            self._env.EPISODE_LEN_SEC = 60  # 60 seconds max
 
         self.reward_range = [-np.inf, np.inf]
         self._step_count = 0
@@ -73,6 +92,10 @@ class PyBulletDroneMilliSignV4:
         self._action_history = deque(maxlen=self.HISTORY_LENGTH)
         self._drone_pos_history = deque(maxlen=self.HISTORY_LENGTH)
 
+        # Velocity history for v19 correlation reward
+        self.VEL_HISTORY_LENGTH = 15  # ~0.5 sec at 30fps
+        self._drone_vel_history = deque(maxlen=self.VEL_HISTORY_LENGTH)
+        self._target_vel_history = deque(maxlen=self.VEL_HISTORY_LENGTH)
         # Previous positions for velocity
         self._prev_person_pos = None
         self._prev_drone_pos = None
@@ -82,16 +105,12 @@ class PyBulletDroneMilliSignV4:
         self._last_known_direction = np.array([1.0, 0.0, 0.0])
         self._search_angle = 0.0
 
-        # Curriculum learning
-        self._curriculum_stages = [
-            {"name": "stationary", "steps": 50000, "person_speed": 0.0},
-            {"name": "slow", "steps": 150000, "person_speed": 0.3},
-            {"name": "medium", "steps": 300000, "person_speed": 0.5},
-            {"name": "fast", "steps": 500000, "person_speed": 0.8},
-            {"name": "very_fast", "steps": 750000, "person_speed": 1.0},
-            {"name": "full", "steps": np.inf, "person_speed": 1.2},
-        ]
-        self._current_stage = 0
+        # Curriculum learning - Continuous (A案)
+        # 線形補間で滑らかに難易度上昇
+        self._curriculum_min_speed = 0.1   # 最初から少し動く（静止なし）
+        self._curriculum_max_speed = 1.2   # 最高速度
+        self._curriculum_ramp_steps = 400000  # 40万ステップで最高難度到達
+        self._current_stage = 0  # 互換性のため残す
 
         self._movement_patterns = {
             "stationary": self._person_stationary,
@@ -104,14 +123,13 @@ class PyBulletDroneMilliSignV4:
         self._current_pattern = "stationary"
 
     def _get_curriculum_stage(self):
-        for i, stage in enumerate(self._curriculum_stages):
-            if self._total_steps < stage["steps"]:
-                return i
-        return len(self._curriculum_stages) - 1
+        """Return continuous progress (0.0 to 1.0) for observation."""
+        progress = min(self._total_steps / self._curriculum_ramp_steps, 1.0)
+        return progress
 
     def _get_person_speed_multiplier(self):
-        stage_idx = self._get_curriculum_stage()
-        return self._curriculum_stages[stage_idx]["person_speed"]
+        """No curriculum - always use random challenging speed."""
+        return self._rng.uniform(0.6, 1.2)  # Always fast
 
     # Movement patterns (same as v3)
     def _person_stationary(self, t):
@@ -137,16 +155,43 @@ class PyBulletDroneMilliSignV4:
         return self._person_pos.copy()
 
     def _person_walk_random(self, t):
+        """Random walk with smooth direction changes."""
         speed_mult = self._get_person_speed_multiplier()
-        if self._episode_step % 60 == 0:
-            angle = self._rng.uniform(0, 2 * np.pi)
-            speed = self._rng.uniform(0.3, 0.8) * speed_mult
-            self._person_vel = np.array([
-                speed * np.cos(angle),
-                speed * np.sin(angle),
-                0.0
-            ])
         dt = 1.0 / 30.0
+        max_turn_rate = 1.0  # radians per second
+        
+        # Set new target direction every 60 steps
+        if self._episode_step % 60 == 0:
+            self._target_angle = self._rng.uniform(0, 2 * np.pi)
+            self._target_speed = self._rng.uniform(0.3, 0.8) * speed_mult
+        
+        # Initialize if needed
+        if not hasattr(self, "_current_angle"):
+            self._current_angle = 0.0
+            self._target_angle = 0.0
+            self._target_speed = 0.5 * speed_mult
+            self._current_speed = 0.5 * speed_mult
+        
+        # Smoothly interpolate angle (shortest path)
+        angle_diff = self._target_angle - self._current_angle
+        while angle_diff > np.pi:
+            angle_diff -= 2 * np.pi
+        while angle_diff < -np.pi:
+            angle_diff += 2 * np.pi
+        max_change = max_turn_rate * dt
+        angle_change = np.clip(angle_diff, -max_change, max_change)
+        self._current_angle += angle_change
+        
+        # Smoothly interpolate speed
+        speed_diff = self._target_speed - self._current_speed
+        self._current_speed += np.clip(speed_diff, -0.5 * dt, 0.5 * dt)
+        
+        # Update velocity and position
+        self._person_vel = np.array([
+            self._current_speed * np.cos(self._current_angle),
+            self._current_speed * np.sin(self._current_angle),
+            0.0
+        ])
         self._person_pos += self._person_vel * dt
         self._person_pos = np.clip(self._person_pos, -4.0, 4.0)
         self._person_pos[2] = 0.0
@@ -223,146 +268,440 @@ class PyBulletDroneMilliSignV4:
         ], dtype=np.float32)
 
     def _calculate_reward(self, drone_pos, tag_pos, radar_obs, action, obs_flat):
-        """Enhanced reward function with yaw alignment and strong distance reward."""
+        """
+        Reward function v12 - Potential-Based Reward Shaping (PBRS).
+
+        Based on research:
+        - "Revisiting Sparse Rewards for Goal-Reaching RL" (arXiv 2407.00324)
+        - "Potential-Based Reward Shaping" theory guarantees policy invariance
+
+        Potential function: Φ(s) = -position_error
+        Shaping reward: F(s,s') = γΦ(s') - Φ(s)
+
+        This is mathematically guaranteed to:
+        1. Not change the optimal policy (no reward hacking)
+        2. Accelerate learning by providing direction
+        3. Automatically encode speed (faster approach = more reward per time)
+        """
         reward = 0.0
+        gamma = 0.99  # Discount factor
+
+        # Get target position and calculate error
+        target_pos = self._get_target_position(drone_pos, tag_pos)
+        position_error = np.linalg.norm(drone_pos - target_pos)
+
+        # === 1. POTENTIAL-BASED REWARD SHAPING ===
+        # Φ(s) = -position_error (closer to target = higher potential)
+        if self._prev_drone_pos is not None:
+            prev_target_pos = self._get_target_position(self._prev_drone_pos, tag_pos)
+            prev_error = np.linalg.norm(self._prev_drone_pos - prev_target_pos)
+
+            # PBRS formula: F = γΦ(s') - Φ(s)
+            phi_prev = -prev_error
+            phi_curr = -position_error
+            shaping_reward = gamma * phi_curr - phi_prev
+
+            # Scale for effective learning
+            reward += 10.0 * shaping_reward
+
+        # === 2. TASK REWARD: Goal reaching ===
+        if position_error < 0.5:
+            reward += 20.0  # Strong bonus for reaching target
+        elif position_error < 1.0:
+            reward += 5.0   # Bonus for being close
+
+        # === 3. MINIMUM TIME PENALTY ===
+        # Encourages faster completion (from "Revisiting Sparse Rewards" paper)
+        reward -= 0.5
+
+        # === 4. Detection tracking (state update only, no reward) ===
         detected = radar_obs[4] > 0.5
-        actual_distance = np.linalg.norm(drone_pos - tag_pos)
-
-        # Get drone yaw and heading to target
-        drone_yaw = self._get_drone_yaw(obs_flat)
-        heading_error, _ = self._get_heading_to_target(drone_pos, tag_pos, drone_yaw)
-
-        # 1. Survival bonus
-        reward += 0.3
-
-        # 2. Detection reward with streak bonus
         if detected:
-            reward += 0.5
             self._detection_streak += 1
-            streak_bonus = min(self._detection_streak / 30.0, 1.0)
-            reward += 0.5 * streak_bonus
-
-            # Update last known direction
             rel_pos = tag_pos - drone_pos
             if np.linalg.norm(rel_pos) > 0.1:
                 self._last_known_direction = rel_pos / np.linalg.norm(rel_pos)
-
-            # Re-detection bonus after losing track
-            if not self._last_detected and self._lost_steps > 10:
-                reward += 1.5  # Increased from v3
-            self._lost_steps = 0
-            self._search_angle = 0.0
         else:
-            penalty = min(0.5 + 0.1 * self._detection_streak / 30.0, 1.5)
-            reward -= penalty
             self._detection_streak = 0
             self._lost_steps += 1
-
-            # [NEW] Exploration reward when lost - encourage searching
-            if self._lost_steps > 5:
-                # Reward for rotating to search
-                if self._prev_action is not None:
-                    yaw_action = action[2] if len(action) > 2 else 0
-                    # Reward slow rotation in search mode
-                    if 0.1 < np.abs(yaw_action) < 0.5:
-                        reward += 0.2
-                    # Penalty for staying still when lost
-                    action_magnitude = np.linalg.norm(action[:2])
-                    if action_magnitude < 0.1:
-                        reward -= 0.2
-
         self._last_detected = detected
 
-        # 3. [IMPROVED] Direction-focused reward over pure distance
-        if detected:
-            # Direction to target
-            rel_pos = tag_pos[:2] - drone_pos[:2]
-            if np.linalg.norm(rel_pos) > 0.1:
-                direction_to_target = rel_pos / np.linalg.norm(rel_pos)
+        return reward
 
-                # If we have previous drone position, check if we're moving toward target
-                if self._prev_drone_pos is not None:
-                    drone_movement = drone_pos[:2] - self._prev_drone_pos[:2]
-                    if np.linalg.norm(drone_movement) > 0.01:
-                        drone_direction = drone_movement / np.linalg.norm(drone_movement)
-                        # Alignment between movement and target direction
-                        alignment = np.dot(drone_direction, direction_to_target)
-                        # Reward moving toward target, penalize moving away
-                        reward += 0.8 * alignment  # Strong direction reward
+    def _calculate_reward_v14(self, drone_pos, tag_pos, radar_obs, action, obs_flat):
+        """
+        Reward function v14 - Goal-Forcing with Safety.
 
-        # 4. [STRENGTHENED] Distance reward - key for reaching target position
-        distance_error = np.abs(actual_distance - self._target_distance)
-        if distance_error < 0.5:  # Within 0.5m of target distance
-            reward += 2.5 * (1.0 - distance_error / 0.5)  # Strong reward for precision
-        elif distance_error < self._distance_threshold:
-            reward += 1.5 * (1.0 - distance_error / self._distance_threshold)
+        Key changes from v12:
+        1. Strong penalty for being far from goal (forces convergence)
+        2. Detection is REQUIRED for full reward (prevents blind flying)
+        3. Velocity penalty for safety
+        4. Exponential reward near goal
+        """
+        reward = 0.0
+
+        # Get target position and calculate error
+        target_pos = self._get_target_position(drone_pos, tag_pos)
+        position_error = np.linalg.norm(drone_pos - target_pos)
+
+        # Detection status
+        detected = radar_obs[4] > 0.5
+
+        # === 1. POSITION REWARD (Exponential near goal) ===
+        if position_error < 0.5:
+            # Goal reached! Big reward
+            reward += 15.0
+        elif position_error < 1.0:
+            # Very close - good reward
+            reward += 8.0 * (1.0 - position_error)
+        elif position_error < 2.0:
+            # Close - moderate reward
+            reward += 2.0 * (1.0 - (position_error - 1.0))
         else:
-            # Stronger penalty for being too far/close
-            reward += max(-1.5, -0.5 * distance_error / self._target_distance)
+            # Far - PENALTY (this forces goal seeking)
+            reward -= 1.0 * (position_error - 2.0)
+            reward = max(reward, -5.0)  # Cap penalty
 
-        # 5. [NEW] Yaw alignment reward - drone should face the target
-        if detected:
-            # Reward for facing the target (heading_error close to 0)
-            yaw_alignment = np.cos(heading_error)  # 1.0 when facing target, -1.0 when facing away
-            reward += 1.0 * yaw_alignment  # Strong reward for facing target
+        # === 2. DETECTION MULTIPLIER (Detection required!) ===
+        if not detected:
+            # Without detection, severely reduce position reward
+            reward *= 0.2
+            # Additional penalty for lost tracking
+            reward -= 1.5
 
-            # Extra bonus for good alignment
-            if np.abs(heading_error) < np.radians(15):  # Within 15 degrees
-                reward += 0.5
-        else:
-            # When lost, reward for rotating to search
-            yaw_action = action[3] if len(action) > 3 else 0
-            if np.abs(yaw_action) > 0.1:  # Rotating to search
-                reward += 0.2
+        # === 3. APPROACH REWARD (PBRS component) ===
+        if self._prev_drone_pos is not None:
+            prev_target_pos = self._get_target_position(self._prev_drone_pos, tag_pos)
+            prev_error = np.linalg.norm(self._prev_drone_pos - prev_target_pos)
+            error_reduction = prev_error - position_error
 
-        # 6. Height reward
-        height_error = np.abs(drone_pos[2] - self._target_height)
-        if height_error < 0.5:
-            reward += 0.6 * (1.0 - height_error / 0.5)
-        else:
-            reward -= min(0.6, height_error / 2.0)
+            # Reward for getting closer (only if detected)
+            if detected:
+                reward += 5.0 * error_reduction
 
-        # 7. Centering reward (radar azimuth)
-        if detected:
-            azimuth_error = np.abs(radar_obs[1])
-            centering_score = max(0, 1.0 - azimuth_error / (np.pi / 3))
-            reward += 0.3 * centering_score  # Reduced since yaw alignment handles this
-
-        # 8. Velocity matching reward
-        if self._prev_drone_pos is not None and self._prev_person_pos is not None:
+        # === 4. VELOCITY PENALTY (Safety) ===
+        if self._prev_drone_pos is not None:
             drone_vel = (drone_pos - self._prev_drone_pos) * 30.0
-            person_vel = (self._person_pos - self._prev_person_pos) * 30.0
-            vel_match = 1.0 - min(1.0, np.linalg.norm(drone_vel[:2] - person_vel[:2]) / 2.0)
-            reward += 0.4 * vel_match
+            speed = np.linalg.norm(drone_vel)
+            if speed > 3.0:
+                reward -= 0.5 * (speed - 3.0)  # Penalty for excessive speed
 
-        # 9. Jitter penalty - penalize rapid action changes
-        if self._prev_action is not None:
-            action_change = np.linalg.norm(action - self._prev_action)
-            if action_change > 0.5:
-                jitter_penalty = 0.3 * (action_change - 0.5)
-                reward -= jitter_penalty
+        # === 5. STAGNATION PENALTY ===
+        if self._prev_drone_pos is not None and position_error > 1.0:
+            movement = np.linalg.norm(drone_pos[:2] - self._prev_drone_pos[:2])
+            if movement < 0.02:
+                reward -= 0.5  # Penalty for not moving when far from goal
 
-        # 10. Anticipation reward
-        if detected and np.linalg.norm(self._person_vel[:2]) > 0.1:
-            direction_to_target = tag_pos[:2] - drone_pos[:2]
-            if np.linalg.norm(direction_to_target) > 0.1:
-                direction_to_target = direction_to_target / np.linalg.norm(direction_to_target)
-                person_dir = self._person_vel[:2] / np.linalg.norm(self._person_vel[:2])
-                alignment = np.dot(direction_to_target, person_dir)
-                reward += 0.3 * max(0, alignment)
+        # === 6. TIME PENALTY (Minimum time) ===
+        reward -= 0.3
 
-        # 11. Safety penalties
-        action_magnitude = np.linalg.norm(action)
-        if action_magnitude > 1.0:
-            reward -= 0.1 * (action_magnitude - 1.0)
+        # Update detection tracking
+        if detected:
+            self._detection_streak += 1
+            self._lost_steps = 0
+            rel_pos = tag_pos - drone_pos
+            if np.linalg.norm(rel_pos) > 0.1:
+                self._last_known_direction = rel_pos / np.linalg.norm(rel_pos)
+        else:
+            self._detection_streak = 0
+            self._lost_steps += 1
+        self._last_detected = detected
 
-        if drone_pos[2] < 0.3:
-            reward -= 2.0
-        if drone_pos[2] > 4.0:
-            reward -= 1.0
-        if np.any(np.abs(drone_pos[:2]) > 6.0):
-            reward -= 2.0
+        return reward
 
+
+    def _calculate_reward_v15(self, drone_pos, tag_pos, radar_obs, action, obs_flat):
+        """
+        Reward v15 - Simple design
+        
+        Principles:
+        1. Maximum 3 reward terms
+        2. Detection failure = no bonus (not penalty)
+        3. Unified scale (-1 to +1 range)
+        """
+        target_pos = self._get_target_position(drone_pos, tag_pos)
+        distance = np.linalg.norm(drone_pos - target_pos)
+        detected = radar_obs[4] > 0.5
+        
+        # === 1. Distance reward (main) ===
+        # Positive within 2m, negative beyond
+        reward = 1.0 - (distance / 2.0)  # 0m: +1.0, 2m: 0, 4m: -1.0
+        reward = np.clip(reward, -1.0, 1.0)
+        
+        # === 2. Detection bonus ===
+        if detected:
+            reward += 0.3
+        
+        # === 3. Success bonus (sparse) ===
+        if distance < 0.5 and detected:
+            reward += 0.5
+        
+        return reward
+
+    def _calculate_reward_v17(self, drone_pos, tag_pos, radar_obs, action, obs_flat):
+        """
+        Reward v17 - Progress-based reward (PBRS-inspired)
+        
+        Based on research papers:
+        - Progress reward: reward improvement in distance, not absolute distance
+        - Small distance penalty to encourage staying close
+        - No complex bonuses - keep it simple and learnable
+        """
+        target_pos = self._get_target_position(drone_pos, tag_pos)
+        distance = np.linalg.norm(drone_pos - target_pos)
+        
+        # Initialize prev_distance if not set
+        if not hasattr(self, "_prev_distance") or self._prev_distance is None:
+            self._prev_distance = distance
+        
+        # === 1. Progress reward (main) ===
+        # Positive when getting closer, negative when getting farther
+        progress = self._prev_distance - distance
+        reward = 10.0 * progress  # Scale up to make signal clearer
+        
+        # === 2. Small distance penalty ===
+        # Encourages staying close, but dominated by progress
+        reward -= 0.1 * distance
+        
+        # Update prev_distance for next step
+        self._prev_distance = distance
+        
+        return reward
+
+    def _calculate_reward_v18(self, drone_pos, tag_pos, radar_obs, action, obs_flat):
+        """
+        Reward v18 - Approach speed based reward
+        
+        Key insight: Reward drone's OWN action, not distance change
+        - Use drone's velocity toward target (approach speed)
+        - This decouples reward from target's movement
+        """
+        target_pos = self._get_target_position(drone_pos, tag_pos)
+        distance = np.linalg.norm(drone_pos - target_pos)
+        
+        # Direction to target (normalized)
+        to_target = target_pos - drone_pos
+        if np.linalg.norm(to_target) > 0.01:
+            to_target_norm = to_target / np.linalg.norm(to_target)
+        else:
+            to_target_norm = np.zeros(3)
+        
+        # Drone velocity (using prev_drone_pos)
+        if self._prev_drone_pos is not None:
+            drone_vel = (drone_pos - self._prev_drone_pos) * 30.0  # Scale by fps
+        else:
+            drone_vel = np.zeros(3)
+        
+        # === 1. Approach speed reward (main) ===
+        # Dot product of velocity and direction to target
+        approach_speed = np.dot(drone_vel, to_target_norm)
+        reward = 5.0 * approach_speed  # Positive when moving toward target
+        
+        # === 2. Small distance bonus when close ===
+        # Encourage staying close once reached
+        if distance < 1.5:
+            reward += 0.5 * (1.5 - distance)  # Max +0.75 at 0m
+        
+        # === 3. Small penalty for being far ===
+        if distance > 3.0:
+            reward -= 0.1 * (distance - 3.0)  # Penalty beyond 3m
+        
+        return reward
+
+    def _calculate_reward_v19(self, drone_pos, tag_pos, radar_obs, action, obs_flat):
+        """
+        Reward v19 - Full tracking reward with correlation
+        
+        Components:
+        1. xy/z separated approach reward (prioritize horizontal pursuit)
+        2. Relative velocity reward (closing speed considering target movement)
+        3. Cross-correlation reward (lag-tolerant pattern matching)
+        """
+        target_pos = self._get_target_position(drone_pos, tag_pos)
+        distance = np.linalg.norm(drone_pos - target_pos)
+        
+        # Direction to target
+        to_target = target_pos - drone_pos
+        to_target_xy = to_target[:2]
+        to_target_z = to_target[2]
+        
+        if np.linalg.norm(to_target_xy) > 0.01:
+            to_target_xy_norm = to_target_xy / np.linalg.norm(to_target_xy)
+        else:
+            to_target_xy_norm = np.zeros(2)
+        
+        to_target_z_sign = np.sign(to_target_z) if abs(to_target_z) > 0.01 else 0
+        
+        # Drone velocity
+        if self._prev_drone_pos is not None:
+            drone_vel = (drone_pos - self._prev_drone_pos) * 30.0
+        else:
+            drone_vel = np.zeros(3)
+        
+        drone_vel_xy = drone_vel[:2]
+        drone_vel_z = drone_vel[2]
+        
+        # Target velocity
+        target_vel = self._person_vel.copy()
+        target_vel_xy = target_vel[:2]
+        
+        # === 1. xy/z separated approach reward ===
+        xy_approach = np.dot(drone_vel_xy, to_target_xy_norm)
+        z_approach = drone_vel_z * to_target_z_sign
+        reward_approach = 6.0 * xy_approach + 2.0 * z_approach  # Prioritize xy
+        
+        # === 2. Relative velocity reward (closing speed) ===
+        relative_vel_xy = drone_vel_xy - target_vel_xy
+        if np.linalg.norm(to_target_xy) > 0.01:
+            closing_speed = np.dot(relative_vel_xy, to_target_xy_norm)
+            reward_closing = 3.0 * closing_speed
+        else:
+            reward_closing = 0.0
+        
+        # === 3. Cross-correlation reward (lag-tolerant) ===
+        # Update velocity history
+        self._drone_vel_history.append(drone_vel_xy.copy())
+        self._target_vel_history.append(target_vel_xy.copy())
+        
+        reward_correlation = 0.0
+        if len(self._drone_vel_history) >= 5:  # Need enough history
+            drone_hist = np.array(list(self._drone_vel_history))
+            target_hist = np.array(list(self._target_vel_history))
+            
+            # Compute correlation at different lags
+            max_lag = min(5, len(drone_hist) - 1)
+            best_corr = -1.0
+            
+            for lag in range(max_lag + 1):
+                if lag == 0:
+                    d = drone_hist
+                    t = target_hist
+                else:
+                    d = drone_hist[lag:]
+                    t = target_hist[:-lag]
+                
+                # Flatten and compute correlation
+                d_flat = d.flatten()
+                t_flat = t.flatten()
+                
+                d_norm = np.linalg.norm(d_flat)
+                t_norm = np.linalg.norm(t_flat)
+                
+                if d_norm > 0.01 and t_norm > 0.01:
+                    corr = np.dot(d_flat, t_flat) / (d_norm * t_norm)
+                    best_corr = max(best_corr, corr)
+            
+            reward_correlation = 2.0 * best_corr  # Scale correlation reward
+        
+        # === 4. Distance bonus/penalty ===
+        if distance < 1.5:
+            reward_distance = 0.3 * (1.5 - distance)
+        elif distance > 3.0:
+            reward_distance = -0.1 * (distance - 3.0)
+        else:
+            reward_distance = 0.0
+        
+        total_reward = reward_approach + reward_closing + reward_correlation + reward_distance
+        return total_reward
+
+    def _calculate_reward_v20(self, drone_pos, tag_pos, radar_obs, action, obs_flat):
+        """
+        Reward v20 - v18 + horizontal boost (minimal change)
+        
+        Based on v18 which worked (311.9 at 140k)
+        Only change: extra reward for horizontal (xy) approach
+        """
+        target_pos = self._get_target_position(drone_pos, tag_pos)
+        distance = np.linalg.norm(drone_pos - target_pos)
+        
+        # Direction to target (3D)
+        to_target = target_pos - drone_pos
+        if np.linalg.norm(to_target) > 0.01:
+            to_target_norm = to_target / np.linalg.norm(to_target)
+        else:
+            to_target_norm = np.zeros(3)
+        
+        # Direction to target (xy only)
+        to_target_xy = to_target[:2]
+        if np.linalg.norm(to_target_xy) > 0.01:
+            to_target_xy_norm = to_target_xy / np.linalg.norm(to_target_xy)
+        else:
+            to_target_xy_norm = np.zeros(2)
+        
+        # Drone velocity
+        if self._prev_drone_pos is not None:
+            drone_vel = (drone_pos - self._prev_drone_pos) * 30.0
+        else:
+            drone_vel = np.zeros(3)
+        
+        drone_vel_xy = drone_vel[:2]
+        
+        # === 1. Approach speed (v18 base) ===
+        approach_speed = np.dot(drone_vel, to_target_norm)
+        reward = 5.0 * approach_speed
+        
+        # === 2. Horizontal boost (NEW) ===
+        xy_approach = np.dot(drone_vel_xy, to_target_xy_norm)
+        reward += 3.0 * xy_approach
+        
+        # === 3. Distance bonus (v18 same) ===
+        if distance < 1.5:
+            reward += 0.5 * (1.5 - distance)
+        
+        if distance > 3.0:
+            reward -= 0.1 * (distance - 3.0)
+        
+        return reward
+
+    def _calculate_reward_v21(self, drone_pos, tag_pos, radar_obs, action, obs_flat):
+        """
+        Reward v21 - v20 + strong distance penalty
+        
+        Fix: drone was floating because no penalty for being far
+        Add continuous distance penalty to create urgency
+        """
+        target_pos = self._get_target_position(drone_pos, tag_pos)
+        distance = np.linalg.norm(drone_pos - target_pos)
+        
+        # Direction to target (3D)
+        to_target = target_pos - drone_pos
+        if np.linalg.norm(to_target) > 0.01:
+            to_target_norm = to_target / np.linalg.norm(to_target)
+        else:
+            to_target_norm = np.zeros(3)
+        
+        # Direction to target (xy only)
+        to_target_xy = to_target[:2]
+        if np.linalg.norm(to_target_xy) > 0.01:
+            to_target_xy_norm = to_target_xy / np.linalg.norm(to_target_xy)
+        else:
+            to_target_xy_norm = np.zeros(2)
+        
+        # Drone velocity
+        if self._prev_drone_pos is not None:
+            drone_vel = (drone_pos - self._prev_drone_pos) * 30.0
+        else:
+            drone_vel = np.zeros(3)
+        
+        drone_vel_xy = drone_vel[:2]
+        
+        # === 1. Approach speed (v20 same) ===
+        approach_speed = np.dot(drone_vel, to_target_norm)
+        reward = 5.0 * approach_speed
+        
+        # === 2. Horizontal boost (v20 same) ===
+        xy_approach = np.dot(drone_vel_xy, to_target_xy_norm)
+        reward += 3.0 * xy_approach
+        
+        # === 3. STRONG distance penalty (NEW) ===
+        # Every step, penalize based on distance
+        # At 3m: -1.5/step, at 1m: -0.5/step
+        reward -= 0.5 * distance
+        
+        # === 4. Close bonus (keep from v20) ===
+        if distance < 1.0:
+            reward += 1.0 * (1.0 - distance)  # Stronger bonus when very close
+        
         return reward
 
     def _get_history_observation(self):
@@ -425,6 +764,36 @@ class PyBulletDroneMilliSignV4:
             heading_error += 2 * np.pi
 
         return heading_error, target_angle
+
+    def _get_target_position(self, drone_pos, tag_pos):
+        """Calculate the target XYZ position for the drone.
+
+        Target is 2.5m behind the person in their movement direction.
+        If person is stationary, target is 2.5m in the direction from drone to person.
+
+        Returns:
+        - target_pos: 3D target position for the drone
+        """
+        # Check if person is moving
+        person_speed = np.linalg.norm(self._person_vel[:2])
+
+        if person_speed > 0.05:
+            # Person is moving - target is behind them
+            person_dir = self._person_vel[:2] / person_speed
+            target_xy = tag_pos[:2] - self._target_distance * person_dir
+        else:
+            # Person is stationary - target is on the line from drone to person
+            rel_pos = tag_pos[:2] - drone_pos[:2]
+            dist_to_tag = np.linalg.norm(rel_pos)
+            if dist_to_tag > 0.1:
+                direction = rel_pos / dist_to_tag
+                target_xy = tag_pos[:2] - self._target_distance * direction
+            else:
+                # Drone is very close to tag, use last known direction
+                target_xy = tag_pos[:2] - self._target_distance * self._last_known_direction[:2]
+
+        target_pos = np.array([target_xy[0], target_xy[1], self._target_height], dtype=np.float32)
+        return target_pos
 
     @property
     def observation_space(self):
@@ -491,7 +860,23 @@ class PyBulletDroneMilliSignV4:
             self._radar_history.append(radar_obs.copy())
             self._drone_pos_history.append(drone_pos.copy())
 
-            step_reward = self._calculate_reward(drone_pos, tag_pos, radar_obs, action_flat, obs_flat_inner)
+            # Select reward function based on version
+            if self._reward_version == "v21":
+                step_reward = self._calculate_reward_v21(drone_pos, tag_pos, radar_obs, action_flat, obs_flat_inner)
+            elif self._reward_version == "v20":
+                step_reward = self._calculate_reward_v20(drone_pos, tag_pos, radar_obs, action_flat, obs_flat_inner)
+            elif self._reward_version == "v19":
+                step_reward = self._calculate_reward_v19(drone_pos, tag_pos, radar_obs, action_flat, obs_flat_inner)
+            elif self._reward_version == "v18":
+                step_reward = self._calculate_reward_v18(drone_pos, tag_pos, radar_obs, action_flat, obs_flat_inner)
+            elif self._reward_version == "v17":
+                step_reward = self._calculate_reward_v17(drone_pos, tag_pos, radar_obs, action_flat, obs_flat_inner)
+            elif self._reward_version == "v15":
+                step_reward = self._calculate_reward_v15(drone_pos, tag_pos, radar_obs, action_flat, obs_flat_inner)
+            elif self._reward_version == "v14":
+                step_reward = self._calculate_reward_v14(drone_pos, tag_pos, radar_obs, action_flat, obs_flat_inner)
+            else:
+                step_reward = self._calculate_reward(drone_pos, tag_pos, radar_obs, action_flat, obs_flat_inner)
             reward += step_reward
 
             # Update previous positions
@@ -507,6 +892,18 @@ class PyBulletDroneMilliSignV4:
                 done = True
                 reward -= 5.0
 
+            # Goal termination check (v23)
+            if self._goal_termination:
+                tag_pos = self._get_tag_position()
+                target_pos = self._get_target_position(drone_pos, tag_pos)
+                dist_to_target = np.linalg.norm(drone_pos - target_pos)
+                if dist_to_target < self._goal_distance:
+                    done = True
+                    reward += 20.0  # Success bonus
+                elif self._episode_step >= self._max_episode_steps:
+                    done = True
+                    reward -= 5.0  # Timeout penalty
+
             if done:
                 break
 
@@ -520,13 +917,16 @@ class PyBulletDroneMilliSignV4:
         else:
             person_vel_est = np.zeros(3)
 
+        # [IMPROVED v5] Include target position error instead of just distance error
+        target_pos = self._get_target_position(drone_pos, tag_pos)
+        target_error = target_pos - drone_pos  # Vector from drone to target
         target_info = np.array([
-            self._target_distance,
-            self._target_height,
-            radar_obs[0] - self._target_distance if radar_obs[4] > 0.5 else 0.0
+            target_error[0],  # X error to target
+            target_error[1],  # Y error to target
+            target_error[2],  # Z error to target
         ], dtype=np.float32)
 
-        curriculum_info = np.array([self._get_curriculum_stage() / 5.0], dtype=np.float32)
+        curriculum_info = np.array([self._get_curriculum_stage()], dtype=np.float32)  # Already 0.0-1.0
         streak_info = np.array([min(self._detection_streak / 60.0, 1.0)], dtype=np.float32)
         lost_info = np.array([min(self._lost_steps / 30.0, 1.0)], dtype=np.float32)
 
@@ -562,13 +962,15 @@ class PyBulletDroneMilliSignV4:
 
         info["discount"] = np.array(0.0 if terminated else 1.0, np.float32)
         info["tag_pos"] = tag_pos.copy()
+        info["target_pos"] = target_pos.copy()  # [NEW v5] Target position
+        info["position_error"] = np.linalg.norm(drone_pos - target_pos)  # [NEW v5]
         info["radar_detection"] = radar_obs.copy()
         info["distance_to_tag"] = np.linalg.norm(drone_pos - tag_pos)
         info["curriculum_stage"] = self._get_curriculum_stage()
         info["detection_streak"] = self._detection_streak
         info["lost_steps"] = self._lost_steps
-        info["heading_error"] = heading_error  # [NEW]
-        info["drone_yaw"] = drone_yaw  # [NEW]
+        info["heading_error"] = heading_error
+        info["drone_yaw"] = drone_yaw
 
         return obs_dict, reward, done, info
 
@@ -582,35 +984,26 @@ class PyBulletDroneMilliSignV4:
         self._detection_streak = 0
         self._last_detected = False
         self._lost_steps = 0
+        self._prev_distance = None  # for v17 reward
         self._search_angle = 0.0
 
         # Clear history buffers
         self._radar_history.clear()
         self._action_history.clear()
         self._drone_pos_history.clear()
+        self._drone_vel_history.clear()
+        self._target_vel_history.clear()
 
-        stage_idx = self._get_curriculum_stage()
-        stage = self._curriculum_stages[stage_idx]
-
-        # Varied initial positions based on stage
-        if stage_idx <= 1:
-            self._person_pos = np.array([2.0, 0.0, 0.0])
-            self._current_pattern = "stationary" if stage_idx == 0 else self._rng.choice(["stationary", "walk_line"])
-        elif stage_idx <= 3:
-            self._person_pos = np.array([
-                self._rng.uniform(1.5, 2.5),
-                self._rng.uniform(-0.5, 0.5),
-                0.0
-            ])
-            self._current_pattern = self._rng.choice(["walk_line", "walk_circle", "walk_random"])
+        # No curriculum - always use challenging conditions
+        self._person_pos = np.array([
+            self._rng.uniform(1.5, 3.5),
+            self._rng.uniform(-1.5, 1.5),
+            0.0
+        ])
+        if self._stationary_target:
+            self._current_pattern = "stationary"
         else:
-            self._person_pos = np.array([
-                self._rng.uniform(1.5, 3.0),
-                self._rng.uniform(-1.0, 1.0),
-                0.0
-            ])
             self._current_pattern = self._rng.choice(["walk_random", "walk_zigzag", "walk_sudden"])
-
         self._person_vel = np.zeros(3)
         self._last_known_direction = np.array([1.0, 0.0, 0.0])
 
@@ -624,8 +1017,11 @@ class PyBulletDroneMilliSignV4:
             self._radar_history.append(radar_obs.copy())
 
         person_vel_est = np.zeros(3, dtype=np.float32)
-        target_info = np.array([self._target_distance, self._target_height, 0.0], dtype=np.float32)
-        curriculum_info = np.array([stage_idx / 5.0], dtype=np.float32)
+        # [IMPROVED v5] Include target position error
+        target_pos = self._get_target_position(drone_pos, tag_pos)
+        target_error = target_pos - drone_pos
+        target_info = np.array([target_error[0], target_error[1], target_error[2]], dtype=np.float32)
+        curriculum_info = np.array([1.0], dtype=np.float32)  # Always max difficulty
         streak_info = np.array([0.0], dtype=np.float32)
         lost_info = np.array([0.0], dtype=np.float32)
 

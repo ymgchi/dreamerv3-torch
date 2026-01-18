@@ -67,6 +67,9 @@ class Logger:
 
     def scalar(self, name, value):
         self._scalars[name] = float(value)
+        # Track eval_return for checkpoint management
+        if name == "eval_return":
+            self._last_eval_return = float(value)
 
     def image(self, name, value):
         self._images[name] = np.array(value)

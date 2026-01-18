@@ -1,4 +1,5 @@
 import copy
+import math
 import torch
 from torch import nn
 
@@ -6,6 +7,26 @@ import networks
 import tools
 
 to_np = lambda x: x.detach().cpu().numpy()
+
+
+def get_entropy_coef(config, step, total_steps):
+    """Calculate entropy coefficient based on schedule."""
+    schedule = config.entropy_schedule
+    base_entropy = config.actor["entropy"]
+
+    if schedule == 'constant' or config.entropy_start is None:
+        return base_entropy
+
+    start = config.entropy_start
+    end = config.entropy_end if config.entropy_end is not None else base_entropy * 0.1
+    progress = min(1.0, step / total_steps)
+
+    if schedule == 'linear':
+        return start + (end - start) * progress
+    elif schedule == 'cosine':
+        return end + (start - end) * 0.5 * (1 + math.cos(math.pi * progress))
+    else:
+        return base_entropy
 
 
 class RewardEMA:
@@ -218,6 +239,8 @@ class ImagBehavior(nn.Module):
         self._use_amp = True if config.precision == 16 else False
         self._config = config
         self._world_model = world_model
+        self._current_step = 0
+        self._total_steps = config.steps
         if config.dyn_discrete:
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
         else:
@@ -284,6 +307,14 @@ class ImagBehavior(nn.Module):
             )
             self.reward_ema = RewardEMA(device=self._config.device)
 
+    def set_step(self, step):
+        """Update current step for entropy scheduling."""
+        self._current_step = step
+
+    def get_current_entropy(self):
+        """Get current entropy coefficient based on schedule."""
+        return get_entropy_coef(self._config, self._current_step, self._total_steps)
+
     def _train(
         self,
         start,
@@ -311,9 +342,12 @@ class ImagBehavior(nn.Module):
                     weights,
                     base,
                 )
-                actor_loss -= self._config.actor["entropy"] * actor_ent[:-1, ..., None]
+                # Use scheduled entropy coefficient
+                entropy_coef = self.get_current_entropy()
+                actor_loss -= entropy_coef * actor_ent[:-1, ..., None]
                 actor_loss = torch.mean(actor_loss)
                 metrics.update(mets)
+                metrics["entropy_coef"] = entropy_coef
                 value_input = imag_feat
 
         with tools.RequiresGrad(self.value):

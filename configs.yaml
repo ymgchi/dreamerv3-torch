@@ -72,6 +72,16 @@ defaults:
   dataset_size: 1000000
   opt: 'adam'
 
+  # Entropy scheduling (auto-adjust exploration)
+  entropy_schedule: 'constant'  # 'constant', 'linear', 'cosine'
+  entropy_start: null  # If null, use actor.entropy
+  entropy_end: null    # Target entropy at end of training
+
+  # Checkpoint management
+  checkpoint_every: 0      # Save checkpoint every N steps (0 = disabled)
+  keep_best_n: 3           # Keep N best checkpoints by eval_return
+  save_best_only: False    # Only save when eval_return improves
+
   # Behavior.
   discount: 0.997
   discount_lambda: 0.95
@@ -361,4 +371,596 @@ millisignv4:
   actor: {layers: 3, dist: 'normal', entropy: 5e-3, unimix_ratio: 0.02, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
   critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
   # Longer imagination horizon for better planning
+  imag_horizon: 20
+
+# MilliSign v4 Finetune - Lower entropy, lower LR for stability
+millisignv4_finetune:
+  task: millisignv4_follow
+  steps: 2e6  # Continue training
+  action_repeat: 1
+  envs: 4
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 0  # No prefill, continue from checkpoint
+  discount: 0.995
+  # State: same as v4
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  # Lower entropy (1e-3 vs 5e-3) and lower LR (3e-5 vs 1e-4) for fine-tuning
+  actor: {layers: 3, dist: 'normal', entropy: 1e-3, unimix_ratio: 0.01, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 3e-5, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 3e-5, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v5 - With entropy scheduling and checkpoint management
+millisignv5:
+  task: millisignv4_follow
+  steps: 1.5e6
+  action_repeat: 1
+  envs: 4
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 15000
+  discount: 0.995
+  # State: same as v4 (118 dims)
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  # Entropy scheduling: start high, end low
+  entropy_schedule: 'linear'
+  entropy_start: 3e-3    # Start with exploration
+  entropy_end: 5e-4      # End with exploitation
+  # Checkpoint management
+  checkpoint_every: 50000   # Save every 50k steps
+  keep_best_n: 5            # Keep top 5 models
+  # Actor/critic with moderate initial entropy
+  actor: {layers: 3, dist: 'normal', entropy: 2e-3, unimix_ratio: 0.02, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v6 - Fast mode finetuning (speed 0.8-1.2)
+millisignv6_fast:
+  task: millisignv4_follow_fast
+  steps: 500000
+  action_repeat: 1
+  envs: 4
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 20000  # Collect data at high speed first
+  discount: 0.995
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  # Higher entropy for exploration in fast scenarios
+  entropy_schedule: 'linear'
+  entropy_start: 5e-3
+  entropy_end: 1e-3
+  checkpoint_every: 25000
+  keep_best_n: 5
+  # Lower LR for finetuning stability
+  actor: {layers: 3, dist: 'normal', entropy: 3e-3, unimix_ratio: 0.02, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 5e-5, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 5e-5, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v7 - Position-based targeting (train from scratch)
+millisignv7:
+  task: millisignv4_follow
+  steps: 1000000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.995
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: 'linear'
+  entropy_start: 5e-3
+  entropy_end: 1e-3
+  checkpoint_every: 25000
+  keep_best_n: 5
+  actor: {layers: 3, dist: 'normal', entropy: 3e-3, unimix_ratio: 0.02, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 8e-5, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 8e-5, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v9 - Distance-proportional reward
+# Key changes: Reward inversely proportional to distance, always better to be closer
+millisignv9:
+  task: millisignv4_follow
+  steps: 500000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.995
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: 'linear'
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 25000
+  keep_best_n: 5
+  actor: {layers: 3, dist: 'normal', entropy: 5e-3, unimix_ratio: 0.03, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v12 - Potential-Based Reward Shaping (PBRS)
+# Based on: "Revisiting Sparse Rewards for Goal-Reaching RL" (arXiv 2407.00324)
+# Theory: PBRS guarantees policy invariance (no reward hacking)
+# Components:
+# 1. PBRS: F = γΦ(s') - Φ(s) where Φ = -distance
+# 2. Goal bonus: +20 at 0.5m, +5 at 1.0m
+# 3. Time penalty: -0.5/step (minimum time formulation)
+millisignv12:
+  task: millisignv4_follow
+  steps: 500000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: 'linear'
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 25000
+  keep_best_n: 5
+  actor: {layers: 3, dist: 'normal', entropy: 5e-3, unimix_ratio: 0.03, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v13 - Continuous Curriculum (A案)
+# Changes from v12:
+# - Continuous curriculum: linear interpolation from 0.1 to 1.2 over 400k steps
+# - No stationary phase: starts with moving target (speed 0.1)
+# - Smoother difficulty progression (no sudden jumps)
+millisignv13:
+  task: millisignv4_follow
+  steps: 500000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: 'linear'
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: 'normal', entropy: 5e-3, unimix_ratio: 0.03, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v14 - Goal-Forcing with Safety
+# Problem: v13 drone tracks person but stays 2-5m away, not reaching 0.5m target
+# Key changes:
+# 1. Strong position reward at goal (+15.0 at <0.5m), penalty when far (forces convergence)
+# 2. Detection REQUIRED for full reward (prevents blind flying)
+# 3. Velocity penalty for speeds > 3m/s (safety)
+# 4. Stagnation penalty (must move when far from goal)
+# 5. Continuous curriculum from v13 (linear 0.1-1.2 m/s over 400k steps)
+millisignv14:
+  task: millisignv4_follow
+  reward_version: v14
+  steps: 500000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: 'linear'
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: 'normal', entropy: 5e-3, unimix_ratio: 0.03, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v11 - Speed-focused reward design
+# Problem: v10 drone too slow to keep up with moving target
+# Key changes:
+# 1. Velocity toward target reward (+8.0 per m/s)
+# 2. Stronger approach reward (15.0 per meter, tripled from v10)
+# 3. Distance-based speed requirement (must move fast when far)
+# 4. Person speed matching bonus
+# 5. Removed time penalty (was discouraging movement)
+millisignv11:
+  task: millisignv4_follow
+  steps: 500000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.995
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: 'linear'
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 25000
+  keep_best_n: 5
+  actor: {layers: 3, dist: 'normal', entropy: 5e-3, unimix_ratio: 0.03, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v10 - Research-informed reward design
+# Based on: Dream to Fly, DreamerNav, UAV Target Tracking papers
+# Key changes:
+# 1. Asymmetric distance reward (retreat penalty > approach reward)
+# 2. Stagnation penalty (penalize not moving when far from target)
+# 3. Target reach bonus (sparse reward for being close)
+# 4. Small time penalty to encourage efficiency
+millisignv10:
+  task: millisignv4_follow
+  steps: 500000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.995
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: 'linear'
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 25000
+  keep_best_n: 5
+  actor: {layers: 3, dist: 'normal', entropy: 5e-3, unimix_ratio: 0.03, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v8 - Simplified reward function (position-dominant)
+# Key changes: Remove lazy hovering incentive, strongly reward reaching target
+millisignv8:
+  task: millisignv4_follow
+  steps: 500000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 512
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.995
+  encoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: 'state', cnn_keys: '$^', mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  # Higher initial entropy for active exploration
+  entropy_schedule: 'linear'
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 25000
+  keep_best_n: 5
+  # Higher entropy and LR for active behavior
+  actor: {layers: 3, dist: 'normal', entropy: 5e-3, unimix_ratio: 0.03, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v15 - Simple reward design
+# Key changes from v14:
+# 1. Only 3 reward terms (distance, detection bonus, success bonus)
+# 2. Detection failure = no bonus (not multiplier penalty)
+# 3. Unified reward scale (-1 to +1.8)
+# 4. Lower train_ratio to prevent overfitting
+millisignv15:
+  task: millisignv4_follow
+  reward_version: v15
+  steps: 200000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 256
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: "linear"
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: "normal", entropy: 5e-3, unimix_ratio: 0.03, std: "learned", min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: "symlog_disc", slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+# MilliSign v16 - No curriculum, always hard conditions
+# Key changes from v15:
+# 1. No curriculum - always challenging patterns (walk_random, walk_zigzag, walk_sudden)
+# 2. Always fast person movement (0.6-1.2x speed)
+# 3. Varied starting positions (1.5-3.5m, -1.5-1.5m)
+millisignv16:
+  task: millisignv4_follow
+  reward_version: v15
+  steps: 200000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 256
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: "linear"
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: "normal", entropy: 5e-3, unimix_ratio: 0.03, std: "learned", min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: "symlog_disc", slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+millisignv17:
+  task: millisignv4_follow
+  reward_version: v17
+  steps: 200000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 256
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: "linear"
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: "normal", entropy: 5e-3, unimix_ratio: 0.03, std: "learned", min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: "symlog_disc", slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+millisignv18:
+  task: millisignv4_follow
+  reward_version: v18
+  steps: 200000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 256
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: "linear"
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: "normal", entropy: 5e-3, unimix_ratio: 0.03, std: "learned", min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: "symlog_disc", slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+millisignv19:
+  task: millisignv4_follow
+  reward_version: v19
+  steps: 200000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 256
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: "linear"
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: "normal", entropy: 5e-3, unimix_ratio: 0.03, std: "learned", min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: "symlog_disc", slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+millisignv20:
+  task: millisignv4_follow
+  reward_version: v20
+  steps: 200000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 256
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: "linear"
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: "normal", entropy: 5e-3, unimix_ratio: 0.03, std: "learned", min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: "symlog_disc", slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+millisignv21:
+  task: millisignv4_follow
+  reward_version: v21
+  steps: 200000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 256
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: "linear"
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: "normal", entropy: 5e-3, unimix_ratio: 0.03, std: "learned", min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: "symlog_disc", slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+millisignv22:
+  task: millisignv4_follow
+  reward_version: v21
+  stationary_target: true
+  steps: 100000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 256
+  time_limit: 480
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: "linear"
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: "normal", entropy: 5e-3, unimix_ratio: 0.03, std: "learned", min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: "symlog_disc", slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+  imag_horizon: 20
+
+millisignv23:
+  task: millisignv4_follow
+  reward_version: v21
+  stationary_target: true
+  goal_termination: true
+  steps: 100000
+  action_repeat: 1
+  envs: 8
+  batch_size: 32
+  batch_length: 64
+  train_ratio: 256
+  time_limit: 1000
+  video_pred_log: false
+  prefill: 10000
+  discount: 0.99
+  encoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  decoder: {mlp_keys: "state", cnn_keys: "$^", mlp_layers: 4, mlp_units: 512}
+  dyn_hidden: 512
+  dyn_deter: 512
+  units: 512
+  entropy_schedule: "linear"
+  entropy_start: 8e-3
+  entropy_end: 1e-3
+  checkpoint_every: 10000
+  keep_best_n: 5
+  actor: {layers: 3, dist: "normal", entropy: 5e-3, unimix_ratio: 0.03, std: "learned", min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+  critic: {layers: 3, dist: "symlog_disc", slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 1e-4, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
   imag_horizon: 20

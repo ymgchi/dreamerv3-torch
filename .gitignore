@@ -136,3 +136,15 @@ dmypy.json
 
 # VScode
 .vscode/*
+
+# Video and media files
+*.mp4
+*.gif
+*.pdf
+
+# Large model files
+*.pt
+*.pth
+
+# Training logs
+logs/

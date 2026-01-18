@@ -1,0 +1,67 @@
+{
+  "timestamp": "2026-01-03T11:44:57.400672",
+  "checkpoint": "/workspace/logdir/millisignv2/latest.pt",
+  "episodes_per_scenario": 5,
+  "scenarios": [
+    {
+      "scenario": "Stationary",
+      "person_speed": 0.0,
+      "episodes": 5,
+      "avg_reward": 274.17999267578125,
+      "std_reward": 59.042545318603516,
+      "avg_detection_rate": 76.36363636363636,
+      "std_detection_rate": 13.169830555303514,
+      "avg_distance_error": 0.9904041982435597,
+      "std_distance_error": 0.6045346039211975
+    },
+    {
+      "scenario": "Slow",
+      "person_speed": 0.3,
+      "episodes": 5,
+      "avg_reward": 262.82415771484375,
+      "std_reward": 85.1382064819336,
+      "avg_detection_rate": 85.04132231404958,
+      "std_detection_rate": 13.439348129159365,
+      "avg_distance_error": 1.3316486514116386,
+      "std_distance_error": 0.6445599970464176
+    },
+    {
+      "scenario": "Medium",
+      "person_speed": 0.5,
+      "episodes": 5,
+      "avg_reward": 286.5453186035156,
+      "std_reward": 50.310569763183594,
+      "avg_detection_rate": 68.7603305785124,
+      "std_detection_rate": 13.904452117060814,
+      "avg_distance_error": 0.8085800409369819,
+      "std_distance_error": 0.41465518990837297
+    },
+    {
+      "scenario": "Fast",
+      "person_speed": 0.8,
+      "episodes": 5,
+      "avg_reward": 231.3520050048828,
+      "std_reward": 72.9508056640625,
+      "avg_detection_rate": 76.52892561983471,
+      "std_detection_rate": 16.415728088626924,
+      "avg_distance_error": 1.5223121025665654,
+      "std_distance_error": 0.7757850111869085
+    },
+    {
+      "scenario": "Very Fast",
+      "person_speed": 1.2,
+      "episodes": 5,
+      "avg_reward": 218.3358154296875,
+      "std_reward": 63.46348190307617,
+      "avg_detection_rate": 78.09917355371901,
+      "std_detection_rate": 15.254595512267102,
+      "avg_distance_error": 1.5407774735053894,
+      "std_distance_error": 0.5158539290978295
+    }
+  ],
+  "overall": {
+    "avg_reward": 254.6474578857422,
+    "avg_detection_rate": 76.95867768595042,
+    "avg_distance_error": 1.238744493332827
+  }
+}

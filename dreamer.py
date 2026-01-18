@@ -3,6 +3,7 @@ import functools
 import os
 import pathlib
 import sys
+import json
 
 os.environ["MUJOCO_GL"] = "osmesa"
 
@@ -117,6 +118,8 @@ class Dreamer(nn.Module):
 
     def _train(self, data):
         metrics = {}
+        # Update step for entropy scheduling
+        self._task_behavior.set_step(self._step)
         post, context, mets = self._wm._train(data)
         metrics.update(mets)
         start = post
@@ -247,11 +250,17 @@ def make_env(config, mode, id):
     elif suite == "millisignv4":
         import envs.drone_millisign_v4 as drone_millisign_v4
 
+        reward_version = getattr(config, 'reward_version', 'v12')
+        stationary_target = getattr(config, 'stationary_target', False)
+        goal_termination = getattr(config, 'goal_termination', False)
         env = drone_millisign_v4.PyBulletDroneMilliSignV4(
             task=task,
             action_repeat=config.action_repeat,
             size=config.size,
             seed=config.seed + id,
+            reward_version=reward_version,
+            stationary_target=stationary_target,
+                goal_termination=goal_termination,
         )
         env = wrappers.NormalizeActions(env)
     else:
@@ -359,13 +368,64 @@ def main(config):
         tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
         agent._should_pretrain._once = False
 
+    # Checkpoint management
+    best_checkpoints = []  # List of (eval_return, step, filename)
+    best_checkpoints_file = logdir / "best_checkpoints.json"
+    if best_checkpoints_file.exists():
+        with open(best_checkpoints_file, 'r') as f:
+            best_checkpoints = json.load(f)
+    last_checkpoint_step = 0
+
+    def save_checkpoint(step, eval_return=None, is_best=False):
+        nonlocal best_checkpoints, last_checkpoint_step
+        items_to_save = {
+            "agent_state_dict": agent.state_dict(),
+            "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+            "step": step,
+            "eval_return": eval_return,
+        }
+        # Always save latest
+        torch.save(items_to_save, logdir / "latest.pt")
+
+        # Save periodic checkpoint
+        if config.checkpoint_every > 0 and step - last_checkpoint_step >= config.checkpoint_every:
+            ckpt_name = f"checkpoint_{step}.pt"
+            torch.save(items_to_save, logdir / ckpt_name)
+            print(f"Saved checkpoint: {ckpt_name}")
+            last_checkpoint_step = step
+
+        # Save best checkpoint
+        if is_best and eval_return is not None and config.keep_best_n > 0:
+            ckpt_name = f"best_{step}_{eval_return:.1f}.pt"
+            torch.save(items_to_save, logdir / ckpt_name)
+            best_checkpoints.append([eval_return, step, ckpt_name])
+            best_checkpoints.sort(key=lambda x: -x[0])  # Sort by return descending
+
+            # Remove old checkpoints if exceeding keep_best_n
+            while len(best_checkpoints) > config.keep_best_n:
+                _, _, old_ckpt = best_checkpoints.pop()
+                old_path = logdir / old_ckpt
+                if old_path.exists():
+                    old_path.unlink()
+                    print(f"Removed old checkpoint: {old_ckpt}")
+
+            # Save best checkpoints list
+            with open(best_checkpoints_file, 'w') as f:
+                json.dump(best_checkpoints, f)
+            print(f"Saved best checkpoint: {ckpt_name} (return: {eval_return:.1f})")
+
+    best_eval_return = -float('inf')
+    if best_checkpoints:
+        best_eval_return = best_checkpoints[0][0]
+
     # make sure eval will be executed once after config.steps
     while agent._step < config.steps + config.eval_every:
         logger.write()
+        current_eval_return = None
         if config.eval_episode_num > 0:
             print("Start evaluation.")
             eval_policy = functools.partial(agent, training=False)
-            tools.simulate(
+            eval_info = tools.simulate(
                 eval_policy,
                 eval_envs,
                 eval_eps,
@@ -374,6 +434,9 @@ def main(config):
                 is_eval=True,
                 episodes=config.eval_episode_num,
             )
+            # Get eval return from logger metrics
+            if hasattr(logger, '_last_eval_return'):
+                current_eval_return = logger._last_eval_return
             if config.video_pred_log:
                 video_pred = agent._wm.video_pred(next(eval_dataset))
                 logger.video("eval_openl", to_np(video_pred))
@@ -388,11 +451,14 @@ def main(config):
             steps=config.eval_every,
             state=state,
         )
-        items_to_save = {
-            "agent_state_dict": agent.state_dict(),
-            "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
-        }
-        torch.save(items_to_save, logdir / "latest.pt")
+        # Check if this is the best model
+        is_best = False
+        if current_eval_return is not None and current_eval_return > best_eval_return:
+            best_eval_return = current_eval_return
+            is_best = True
+            print(f"New best eval return: {best_eval_return:.1f}")
+
+        save_checkpoint(agent._step * config.action_repeat, current_eval_return, is_best)
     for env in train_envs + eval_envs:
         try:
             env.close()
